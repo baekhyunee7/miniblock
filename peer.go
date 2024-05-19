@@ -108,7 +108,7 @@ func (p *Peers) readLoop(conn *websocket.Conn) {
 		case QueryLatest:
 			conn.WriteJSON(&PeerMsg{
 				Id:   ResponseLatest,
-				Data: GBlockChain.marshalLastBlock(),
+				Data: GBlockChain.marshalLastBlockSafe(),
 			})
 		case ResponseLatest:
 			var block Block

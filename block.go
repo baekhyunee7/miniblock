@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/gorilla/websocket"
 )
 
@@ -16,35 +17,40 @@ var (
 	GBlockChain                      = newBlockChain()
 	DIFFICULTY_ADJUST_BLOCK_INTERVAL = 10
 	DIFFICULTY_ADJUST_TIME_INTERVAL  = 10
+	MINE_AMOUNT                      = 100
 )
 
 type Block struct {
-	Index        int64  `json:"index"`
-	Data         []byte `json:"data"`
-	Ts           int64  `json:"ts"`
-	Hash         string `json:"hash"`
-	PreviousHash string `json:"previousHash"`
-	Difficulty   int    `json:"diffculty"`
-	Nonce        int64  `json:"nonce"`
+	Index        int64          `json:"index"`
+	Data         []*Transaction `json:"data"`
+	Ts           int64          `json:"ts"`
+	Hash         string         `json:"hash"`
+	PreviousHash string         `json:"previousHash"`
+	Difficulty   int            `json:"diffculty"`
+	Nonce        int64          `json:"nonce"`
 }
 
 func (b *Block) equal(o *Block) bool {
+	txData, _ := json.Marshal(b.Data)
+	oTxData, _ := json.Marshal(o.Data)
 	return b.Index == o.Index &&
-		string(b.Data) == string(o.Data) &&
+		string(txData) == string(oTxData) &&
 		b.Ts == o.Ts &&
 		b.Hash == o.Hash &&
 		b.PreviousHash == o.PreviousHash &&
 		b.Difficulty == o.Difficulty
 }
 
-func calculateHash(index int64, previousHash string, ts int64, data []byte, difficulty int, nonce int64) string {
+func calculateHash(index int64, previousHash string, ts int64, data []*Transaction, difficulty int, nonce int64) string {
 	bs := []byte{}
 	bs = append(bs, int64ToBytes(index)...)
 	bs = append(bs, []byte(previousHash)...)
 	bs = append(bs, int64ToBytes(ts)...)
 	bs = append(bs, int64ToBytes(int64(difficulty))...)
 	bs = append(bs, int64ToBytes(nonce)...)
-	bs = append(bs, data...)
+	for _, tx := range data {
+		bs = append(bs, []byte(tx.Id)...)
+	}
 	h := sha256.New()
 	_, err := h.Write(bs)
 	if err != nil {
@@ -53,7 +59,7 @@ func calculateHash(index int64, previousHash string, ts int64, data []byte, diff
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func newBlock(index int64, previousHash string, ts int64, difficulty int, nonce int64, data []byte) *Block {
+func newBlock(index int64, previousHash string, ts int64, difficulty int, nonce int64, data []*Transaction) *Block {
 	b := &Block{
 		Index:        index,
 		Data:         data,
@@ -73,18 +79,20 @@ func int64ToBytes(n int64) []byte {
 }
 
 type BlockChain struct {
-	mux    sync.Mutex
-	blocks []*Block
+	mux           sync.Mutex
+	blocks        []*Block
+	unSpentTxOuts map[string]*UnSpentTxOut
 }
 
 func newBlockChain() *BlockChain {
-	genesisblock := newBlock(0, "", 0, 1, 0, []byte("genesis"))
+	genesisblock := newBlock(0, "", 0, 1, 0, []*Transaction{})
 	return &BlockChain{
-		blocks: []*Block{genesisblock},
+		blocks:        []*Block{genesisblock},
+		unSpentTxOuts: map[string]*UnSpentTxOut{},
 	}
 }
 
-func (c *BlockChain) generateNextBlock(data []byte) *Block {
+func (c *BlockChain) generateNextBlock(data []*Transaction) *Block {
 	c.mux.Lock()
 	lastBlock := c.blocks[len(c.blocks)-1]
 	diffculty := c.getDifficulty()
@@ -92,20 +100,19 @@ func (c *BlockChain) generateNextBlock(data []byte) *Block {
 	ts := time.Now().Unix()
 	index := lastBlock.Index + 1
 	newBlock := getBlock(index, lastBlock.Hash, ts, diffculty, data)
+	c.mux.Lock()
+	defer c.mux.Unlock()
 	c.addBlock(newBlock)
 	c.broadcastLatest()
 	return newBlock
 }
 
-func (c *BlockChain) addBlock(b *Block) {
-	c.mux.Lock()
-	defer c.mux.Unlock()
-	c.addBlockUnsafe(b)
-}
-
-func (c *BlockChain) addBlockUnsafe(b *Block) bool {
+func (c *BlockChain) addBlock(b *Block) bool {
 	lastBlock := c.blocks[len(c.blocks)-1]
 	if isValidBlock(lastBlock, b) {
+		if !c.processTxs(b.Data, b.Index) {
+			return false
+		}
 		log.Println("add block success")
 		c.blocks = append(c.blocks, b)
 		return true
@@ -115,7 +122,7 @@ func (c *BlockChain) addBlockUnsafe(b *Block) bool {
 	}
 }
 
-func getBlock(index int64, previousHash string, ts int64, difficulty int, data []byte) *Block {
+func getBlock(index int64, previousHash string, ts int64, difficulty int, data []*Transaction) *Block {
 	nonce := int64(0)
 	for {
 		hash := calculateHash(index, previousHash, ts, data, difficulty, nonce)
@@ -157,7 +164,6 @@ func isValidBlock(preBlock *Block, b *Block) bool {
 	return true
 }
 
-// 已经上锁
 func (c *BlockChain) isValidChain(blocks []*Block) bool {
 	if len(blocks) < 1 {
 		return false
@@ -185,6 +191,15 @@ func (c *BlockChain) replaceChain(blocks []*Block) {
 	}
 }
 
+func (c *BlockChain) processTxs(txs []*Transaction, index int64) bool {
+	if c.txsIsValid(txs, index) {
+		c.updateUnspentTxOut(txs)
+		return true
+	}
+	log.Println("transactions is not valid")
+	return false
+}
+
 func (c *BlockChain) broadcastLatest() {
 	data := c.marshalLastBlock()
 	GPeers.broadcast(&PeerMsg{
@@ -203,9 +218,13 @@ func (c *BlockChain) marshal() []byte {
 	return ret
 }
 
-func (c *BlockChain) marshalLastBlock() []byte {
+func (c *BlockChain) marshalLastBlockSafe() []byte {
 	c.mux.Lock()
 	defer c.mux.Unlock()
+	return c.marshalLastBlock()
+}
+
+func (c *BlockChain) marshalLastBlock() []byte {
 	ret, err := json.Marshal(c.blocks[len(c.blocks)-1])
 	if err != nil {
 		log.Fatalf("json marshal err: %v", err)
@@ -213,7 +232,6 @@ func (c *BlockChain) marshalLastBlock() []byte {
 	return ret
 }
 
-// 在锁中
 func (c *BlockChain) getDifficulty() int {
 	lastBlock := c.blocks[len(c.blocks)-1]
 	if lastBlock.Index != 0 && lastBlock.Index%int64(DIFFICULTY_ADJUST_BLOCK_INTERVAL) == 0 {
@@ -236,7 +254,7 @@ func (c *BlockChain) handleResponseLatest(b *Block, conn *websocket.Conn) {
 	latestBlock := c.blocks[len(c.blocks)-1]
 	if latestBlock.Index < b.Index {
 		if b.PreviousHash == latestBlock.Hash {
-			if c.addBlockUnsafe(b) {
+			if c.addBlock(b) {
 				conn.WriteJSON(&PeerMsg{
 					Id:   ResponseLatest,
 					Data: c.marshalLastBlock(),
@@ -249,5 +267,78 @@ func (c *BlockChain) handleResponseLatest(b *Block, conn *websocket.Conn) {
 		}
 	} else {
 		log.Printf("received block is not ahead of local")
+	}
+}
+
+func coinbaseTxIsValid(tx *Transaction, index int64) bool {
+	if tx.getTxId() != tx.Id {
+		return false
+	}
+	if len(tx.TxIns) != 1 {
+		return false
+	}
+	if tx.TxIns[0].TxOutIndex != int(index) {
+		return false
+	}
+	if len(tx.TxOuts) != 1 {
+		return false
+	}
+	if tx.TxOuts[0].Amount != int64(MINE_AMOUNT) {
+		return false
+	}
+	return true
+}
+
+func (c *BlockChain) txsIsValid(txs []*Transaction, index int64) bool {
+	if !coinbaseTxIsValid(txs[0], index) {
+		return false
+	}
+	for _, tx := range txs[1:] {
+		spent := int64(0)
+		if tx.getTxId() != tx.Id {
+			return false
+		}
+		for _, in := range tx.TxIns {
+			key := txOutKey(in.TxOutId, in.TxOutIndex)
+			unSpentTxOut, ok := c.unSpentTxOuts[key]
+			if !ok {
+				return false
+			}
+			addr := unSpentTxOut.Address
+			hash := crypto.Keccak256Hash([]byte(tx.Id))
+			pubKey, err := crypto.SigToPub(hash.Bytes(), []byte(in.Signature))
+			if err != nil {
+				return false
+			}
+			recoveredAddr := crypto.PubkeyToAddress(*pubKey)
+			if addr != recoveredAddr.Hex() {
+				return false
+			}
+			spent += unSpentTxOut.Amount
+		}
+		for _, out := range tx.TxOuts {
+			spent -= out.Amount
+		}
+		if spent != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *BlockChain) updateUnspentTxOut(txs []*Transaction) {
+	for _, tx := range txs {
+		for _, in := range tx.TxIns {
+			delete(c.unSpentTxOuts, txOutKey(in.TxOutId, in.TxOutIndex))
+		}
+		for i, out := range tx.TxOuts {
+			key := txOutKey(tx.Id, i)
+			c.unSpentTxOuts[key] = &UnSpentTxOut{
+				TxOutId:    tx.Id,
+				TxOutIndex: i,
+				Address:    out.Address,
+				Amount:     out.Amount,
+			}
+		}
 	}
 }
