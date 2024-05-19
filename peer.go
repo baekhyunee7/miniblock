@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"sync"
@@ -42,11 +43,13 @@ func (p *Peers) marshal() []byte {
 }
 
 func (p *Peers) addPeer(url string) {
+	url = fmt.Sprintf("%s/ws", url)
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
-		log.Printf("add peer fail: %v", err)
+		log.Printf("add peer %s fail: %v", url, err)
 		return
 	}
+	p.addConn(conn)
 	go p.readLoop(conn)
 	conn.WriteJSON(&PeerMsg{
 		Id: QueryLatest,
@@ -128,6 +131,17 @@ func (p *Peers) readLoop(conn *websocket.Conn) {
 				continue
 			}
 			GBlockChain.replaceChain(blocks)
+		}
+	}
+}
+
+func (p *Peers) broadcast(msg *PeerMsg) {
+	p.mux.Lock()
+	defer p.mux.Unlock()
+	for peer := range p.peers {
+		err := peer.WriteJSON(msg)
+		if err != nil {
+			log.Printf("write message fail, err: %v", err)
 		}
 	}
 }

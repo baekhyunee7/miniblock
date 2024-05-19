@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"log"
 	"sync"
@@ -49,7 +50,7 @@ func calculateHash(index int64, previousHash string, ts int64, data []byte, diff
 	if err != nil {
 		log.Fatal(err)
 	}
-	return string(h.Sum(nil))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func newBlock(index int64, previousHash string, ts int64, difficulty int, nonce int64, data []byte) *Block {
@@ -59,6 +60,8 @@ func newBlock(index int64, previousHash string, ts int64, difficulty int, nonce 
 		Ts:           ts,
 		PreviousHash: previousHash,
 		Hash:         calculateHash(index, previousHash, ts, data, difficulty, nonce),
+		Difficulty:   difficulty,
+		Nonce:        nonce,
 	}
 	return b
 }
@@ -75,21 +78,22 @@ type BlockChain struct {
 }
 
 func newBlockChain() *BlockChain {
-	genesisblock := newBlock(0, "", time.Now().Unix(), 1, 0, []byte("genesis"))
+	genesisblock := newBlock(0, "", 0, 1, 0, []byte("genesis"))
 	return &BlockChain{
 		blocks: []*Block{genesisblock},
 	}
 }
 
-func (b *BlockChain) generateNextBlock(data []byte) *Block {
-	b.mux.Lock()
-	lastBlock := b.blocks[len(b.blocks)-1]
-	diffculty := b.getDifficulty()
-	b.mux.Unlock()
+func (c *BlockChain) generateNextBlock(data []byte) *Block {
+	c.mux.Lock()
+	lastBlock := c.blocks[len(c.blocks)-1]
+	diffculty := c.getDifficulty()
+	c.mux.Unlock()
 	ts := time.Now().Unix()
 	index := lastBlock.Index + 1
-	newBlock := getBlock(index, lastBlock.PreviousHash, ts, diffculty, data)
-	b.addBlock(newBlock)
+	newBlock := getBlock(index, lastBlock.Hash, ts, diffculty, data)
+	c.addBlock(newBlock)
+	c.broadcastLatest()
 	return newBlock
 }
 
@@ -138,7 +142,7 @@ func hashMatchDiffculty(hash string, diffculty int) bool {
 }
 
 func isValidBlock(preBlock *Block, b *Block) bool {
-	if preBlock.Index != b.Index+1 {
+	if preBlock.Index+1 != b.Index {
 		return false
 	}
 	if preBlock.Hash != b.PreviousHash {
@@ -174,10 +178,19 @@ func (c *BlockChain) replaceChain(blocks []*Block) {
 	defer c.mux.Unlock()
 	if c.isValidChain(blocks) && len(blocks) > len(c.blocks) {
 		c.blocks = blocks
-		// todo: broadcastLatest()
+		log.Printf("repalce chain success")
+		c.broadcastLatest()
 	} else {
 		log.Println("received chain invalid")
 	}
+}
+
+func (c *BlockChain) broadcastLatest() {
+	data := c.marshalLastBlock()
+	GPeers.broadcast(&PeerMsg{
+		Id:   ResponseLatest,
+		Data: data,
+	})
 }
 
 func (c *BlockChain) marshal() []byte {
@@ -221,16 +234,20 @@ func (c *BlockChain) handleResponseLatest(b *Block, conn *websocket.Conn) {
 	c.mux.Lock()
 	defer c.mux.Unlock()
 	latestBlock := c.blocks[len(c.blocks)-1]
-	if b.PreviousHash == latestBlock.Hash {
-		if c.addBlockUnsafe(b) {
+	if latestBlock.Index < b.Index {
+		if b.PreviousHash == latestBlock.Hash {
+			if c.addBlockUnsafe(b) {
+				conn.WriteJSON(&PeerMsg{
+					Id:   ResponseLatest,
+					Data: c.marshalLastBlock(),
+				})
+			}
+		} else {
 			conn.WriteJSON(&PeerMsg{
-				Id:   ResponseLatest,
-				Data: c.marshalLastBlock(),
+				Id: QueryAll,
 			})
 		}
 	} else {
-		conn.WriteJSON(&PeerMsg{
-			Id: QueryAll,
-		})
+		log.Printf("received block is not ahead of local")
 	}
 }

@@ -1,13 +1,26 @@
 package main
 
 import (
+	"flag"
+	"fmt"
 	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 )
 
+var (
+	httPort int
+	wsPort  int
+)
+
+func init() {
+	flag.IntVar(&httPort, "hp", 3001, "http port")
+	flag.IntVar(&wsPort, "wp", 3002, "ws port")
+}
+
 func main() {
+	flag.Parse()
 	app := gin.Default()
 	app.GET("/blocks", func(ctx *gin.Context) {
 		ctx.Data(http.StatusOK, "application/json", GBlockChain.marshal())
@@ -35,7 +48,7 @@ func main() {
 	})
 	go func() {
 		http.HandleFunc("/ws", ws)
-		log.Fatal(http.ListenAndServe(":3002", nil))
+		log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", wsPort), nil))
 	}()
-	app.Run(":3001")
+	app.Run(fmt.Sprintf(":%d", httPort))
 }
