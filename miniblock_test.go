@@ -9,9 +9,9 @@ import (
 )
 
 func TestTrasaction(t *testing.T) {
-	txs := [2]*Transaction{}
 	privateKeys := [2]*ecdsa.PrivateKey{}
 	addrs := [2]string{}
+	txIds := [2]string{}
 	for i := 0; i < 2; i++ {
 		privateKey, err := crypto.GenerateKey()
 		assert.Nil(t, err)
@@ -20,44 +20,15 @@ func TestTrasaction(t *testing.T) {
 		privateKeys[i] = privateKey
 		address := crypto.PubkeyToAddress(*publicKeyECDSA).Hex()
 		addrs[i] = address
-		tx := &Transaction{
-			TxIns: []TxIn{
-				{
-					TxOutId:    "test_out_id",
-					TxOutIndex: i + 1,
-				},
-			},
-			TxOuts: []TxOut{
-				{
-					Address: address,
-					Amount:  int64(MINE_AMOUNT),
-				},
-			},
-		}
-		tx.Id = tx.getTxId()
-		txs[i] = tx
-		newBlock := GBlockChain.generateNextBlock([]*Transaction{tx})
+		key, _ := serializeECDSAPrivateKey(privateKey)
+		newBlock := GBlockChain.generateNextBlock(key)
 		assert.NotNil(t, newBlock)
+		txIds[i] = newBlock.Data[0].Id
 	}
-	coinBaseTx := &Transaction{
-		TxIns: []TxIn{
-			{
-				TxOutId:    "test_out_id",
-				TxOutIndex: 3,
-			},
-		},
-		TxOuts: []TxOut{
-			{
-				Address: addrs[0],
-				Amount:  int64(MINE_AMOUNT),
-			},
-		},
-	}
-	coinBaseTx.Id = coinBaseTx.getTxId()
 	tx := &Transaction{
 		TxIns: []TxIn{
 			{
-				TxOutId:    txs[0].Id,
+				TxOutId:    txIds[0],
 				TxOutIndex: 0,
 			},
 		},
@@ -77,6 +48,17 @@ func TestTrasaction(t *testing.T) {
 	signature, err := crypto.Sign(hash.Bytes(), privateKeys[0])
 	assert.Nil(t, err)
 	tx.TxIns[0].Signature = string(signature)
-	newBlock := GBlockChain.generateNextBlock([]*Transaction{coinBaseTx, tx})
+	GBlockChain.handleNewTx(tx)
+	key, _ := serializeECDSAPrivateKey(privateKeys[0])
+	newBlock := GBlockChain.generateNextBlock(key)
 	assert.NotNil(t, newBlock)
+}
+
+func TestSerializeKey(t *testing.T) {
+	priv, err := crypto.GenerateKey()
+	assert.Nil(t, err)
+	pemStr, err := serializeECDSAPrivateKey(priv)
+	assert.Nil(t, err)
+	_, err = deserializeECDSAPrivateKey(pemStr)
+	assert.Nil(t, err)
 }

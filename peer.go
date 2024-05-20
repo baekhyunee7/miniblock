@@ -21,6 +21,8 @@ const (
 	ResponseLatest
 	QueryAll
 	ResponseAll
+	QueryPool
+	ResponsePool
 )
 
 type Peers struct {
@@ -53,6 +55,9 @@ func (p *Peers) addPeer(url string) {
 	go p.readLoop(conn)
 	conn.WriteJSON(&PeerMsg{
 		Id: QueryLatest,
+	})
+	conn.WriteJSON(&PeerMsg{
+		Id: QueryPool,
 	})
 }
 
@@ -131,6 +136,19 @@ func (p *Peers) readLoop(conn *websocket.Conn) {
 				continue
 			}
 			GBlockChain.replaceChain(blocks)
+		case QueryPool:
+			conn.WriteJSON(&PeerMsg{
+				Id:   ResponsePool,
+				Data: GBlockChain.marshalPoolSafe(),
+			})
+		case ResponsePool:
+			txs := map[string]*Transaction{}
+			err := json.Unmarshal(msg.Data, &txs)
+			if err != nil {
+				log.Printf("unmarshal fail: %v", err)
+				continue
+			}
+			GBlockChain.handleNewPool(txs)
 		}
 	}
 }

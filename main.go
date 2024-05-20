@@ -26,13 +26,11 @@ func main() {
 		ctx.Data(http.StatusOK, "application/json", GBlockChain.marshal())
 	})
 	app.POST("/mineBlock", func(ctx *gin.Context) {
-		var txs []*Transaction
-		err := ctx.ShouldBind(&txs)
+		data, err := ctx.GetRawData()
 		if err != nil {
 			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
 		}
-		newBlock := GBlockChain.generateNextBlock(txs)
+		newBlock := GBlockChain.generateNextBlock(string(data))
 		ctx.JSON(http.StatusOK, newBlock)
 	})
 	app.GET("/peers", func(ctx *gin.Context) {
@@ -46,6 +44,15 @@ func main() {
 		}
 		GPeers.addPeer(string(data))
 		ctx.Data(http.StatusOK, "application/json", nil)
+	})
+	app.POST("/sendTx", func(ctx *gin.Context) {
+		var tx Transaction
+		err := ctx.ShouldBind(&tx)
+		if err != nil {
+			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		GBlockChain.handleNewTx(&tx)
 	})
 	go func() {
 		http.HandleFunc("/ws", ws)

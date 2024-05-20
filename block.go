@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/ecdsa"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -82,6 +83,7 @@ type BlockChain struct {
 	mux           sync.Mutex
 	blocks        []*Block
 	unSpentTxOuts map[string]*UnSpentTxOut
+	memPool       map[string]*Transaction
 }
 
 func newBlockChain() *BlockChain {
@@ -89,17 +91,18 @@ func newBlockChain() *BlockChain {
 	return &BlockChain{
 		blocks:        []*Block{genesisblock},
 		unSpentTxOuts: map[string]*UnSpentTxOut{},
+		memPool:       map[string]*Transaction{},
 	}
 }
 
-func (c *BlockChain) generateNextBlock(data []*Transaction) *Block {
+func (c *BlockChain) generateNextBlock(key string) *Block {
 	c.mux.Lock()
 	lastBlock := c.blocks[len(c.blocks)-1]
 	diffculty := c.getDifficulty()
 	c.mux.Unlock()
 	ts := time.Now().Unix()
 	index := lastBlock.Index + 1
-	newBlock := getBlock(index, lastBlock.Hash, ts, diffculty, data)
+	newBlock := c.getBlock(index, lastBlock.Hash, ts, diffculty, key)
 	c.mux.Lock()
 	defer c.mux.Unlock()
 	c.addBlock(newBlock)
@@ -122,7 +125,37 @@ func (c *BlockChain) addBlock(b *Block) bool {
 	}
 }
 
-func getBlock(index int64, previousHash string, ts int64, difficulty int, data []*Transaction) *Block {
+func getCoinBaseTx(key string, index int64) *Transaction {
+	privateKey, err := deserializeECDSAPrivateKey(key)
+	if err != nil {
+		log.Fatal(err)
+	}
+	publicKey := privateKey.Public()
+	publicKeyECDSA := publicKey.(*ecdsa.PublicKey)
+	address := crypto.PubkeyToAddress(*publicKeyECDSA).Hex()
+	tx := &Transaction{
+		TxIns: []TxIn{
+			{
+				TxOutIndex: int(index),
+			},
+		},
+		TxOuts: []TxOut{
+			{
+				Address: address,
+				Amount:  int64(MINE_AMOUNT),
+			},
+		},
+	}
+	tx.Id = tx.getTxId()
+	return tx
+}
+
+func (c *BlockChain) getBlock(index int64, previousHash string, ts int64, difficulty int, key string) *Block {
+	coinBaseTx := getCoinBaseTx(key, index)
+	data := []*Transaction{coinBaseTx}
+	for _, tx := range c.memPool {
+		data = append(data, tx)
+	}
 	nonce := int64(0)
 	for {
 		hash := calculateHash(index, previousHash, ts, data, difficulty, nonce)
@@ -194,10 +227,23 @@ func (c *BlockChain) replaceChain(blocks []*Block) {
 func (c *BlockChain) processTxs(txs []*Transaction, index int64) bool {
 	if c.txsIsValid(txs, index) {
 		c.updateUnspentTxOut(txs)
+		c.updatePool(txs)
 		return true
 	}
 	log.Println("transactions is not valid")
 	return false
+}
+
+func (c *BlockChain) updatePool(txs []*Transaction) {
+	for _, tx := range txs {
+		for _, in := range tx.TxIns {
+			key := txOutKey(in.TxOutId, in.TxOutIndex)
+			if _, ok := c.unSpentTxOuts[key]; !ok {
+				delete(c.memPool, tx.Id)
+				continue
+			}
+		}
+	}
 }
 
 func (c *BlockChain) broadcastLatest() {
@@ -228,6 +274,20 @@ func (c *BlockChain) marshalLastBlock() []byte {
 	ret, err := json.Marshal(c.blocks[len(c.blocks)-1])
 	if err != nil {
 		log.Fatalf("json marshal err: %v", err)
+	}
+	return ret
+}
+
+func (c *BlockChain) marshalPoolSafe() []byte {
+	c.mux.Lock()
+	defer c.mux.Unlock()
+	return c.marshalPool()
+}
+
+func (c *BlockChain) marshalPool() []byte {
+	ret, err := json.Marshal(c.memPool)
+	if err != nil {
+		log.Fatal(err)
 	}
 	return ret
 }
@@ -294,36 +354,40 @@ func (c *BlockChain) txsIsValid(txs []*Transaction, index int64) bool {
 		return false
 	}
 	for _, tx := range txs[1:] {
-		spent := int64(0)
-		if tx.getTxId() != tx.Id {
-			return false
-		}
-		for _, in := range tx.TxIns {
-			key := txOutKey(in.TxOutId, in.TxOutIndex)
-			unSpentTxOut, ok := c.unSpentTxOuts[key]
-			if !ok {
-				return false
-			}
-			addr := unSpentTxOut.Address
-			hash := crypto.Keccak256Hash([]byte(tx.Id))
-			pubKey, err := crypto.SigToPub(hash.Bytes(), []byte(in.Signature))
-			if err != nil {
-				return false
-			}
-			recoveredAddr := crypto.PubkeyToAddress(*pubKey)
-			if addr != recoveredAddr.Hex() {
-				return false
-			}
-			spent += unSpentTxOut.Amount
-		}
-		for _, out := range tx.TxOuts {
-			spent -= out.Amount
-		}
-		if spent != 0 {
+		if !c.txIsValid(tx) {
 			return false
 		}
 	}
 	return true
+}
+
+func (c *BlockChain) txIsValid(tx *Transaction) bool {
+	spent := int64(0)
+	if tx.getTxId() != tx.Id {
+		return false
+	}
+	for _, in := range tx.TxIns {
+		key := txOutKey(in.TxOutId, in.TxOutIndex)
+		unSpentTxOut, ok := c.unSpentTxOuts[key]
+		if !ok {
+			return false
+		}
+		addr := unSpentTxOut.Address
+		hash := crypto.Keccak256Hash([]byte(tx.Id))
+		pubKey, err := crypto.SigToPub(hash.Bytes(), []byte(in.Signature))
+		if err != nil {
+			return false
+		}
+		recoveredAddr := crypto.PubkeyToAddress(*pubKey)
+		if addr != recoveredAddr.Hex() {
+			return false
+		}
+		spent += unSpentTxOut.Amount
+	}
+	for _, out := range tx.TxOuts {
+		spent -= out.Amount
+	}
+	return spent == 0
 }
 
 func (c *BlockChain) updateUnspentTxOut(txs []*Transaction) {
@@ -340,5 +404,48 @@ func (c *BlockChain) updateUnspentTxOut(txs []*Transaction) {
 				Amount:     out.Amount,
 			}
 		}
+	}
+}
+
+func (c *BlockChain) handleNewTx(tx *Transaction) {
+	c.mux.Lock()
+	defer c.mux.Unlock()
+	if !c.txIsValid(tx) {
+		log.Printf("tx not valid")
+		return
+	}
+	for _, txIn := range tx.TxIns {
+		for _, memTx := range c.memPool {
+			for _, memIn := range memTx.TxIns {
+				if txIn.TxOutId == memIn.TxOutId && txIn.TxOutIndex == memIn.TxOutIndex {
+					log.Printf("this transaction already exist")
+					return
+				}
+			}
+		}
+	}
+	c.memPool[tx.Id] = tx
+}
+
+func (c *BlockChain) handleNewPool(txs map[string]*Transaction) {
+	c.mux.Lock()
+	defer c.mux.Unlock()
+	needUpdate := false
+	for id, tx := range txs {
+		if _, ok := c.memPool[id]; ok {
+			continue
+		}
+		if !c.txIsValid(tx) {
+			continue
+		}
+		c.memPool[id] = tx
+		needUpdate = true
+	}
+
+	if needUpdate {
+		GPeers.broadcast(&PeerMsg{
+			Id:   ResponsePool,
+			Data: c.marshalPool(),
+		})
 	}
 }
