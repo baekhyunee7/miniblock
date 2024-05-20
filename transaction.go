@@ -1,13 +1,9 @@
 package main
 
 import (
-	"crypto/ecdsa"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"log"
-
-	"github.com/ethereum/go-ethereum/crypto"
 )
 
 type TxOut struct {
@@ -51,27 +47,21 @@ type UnSpentTxOut struct {
 	Amount     int64
 }
 
-func signTxIn(tx *Transaction, inIndex int, privateKey *ecdsa.PrivateKey, unSpent map[string]*UnSpentTxOut) string {
-	txIn := tx.TxIns[inIndex]
-	data := tx.Id
-	unSpentTxOut := findUnspentTxOut(txIn.TxOutId, txIn.TxOutIndex, unSpent)
-	if unSpentTxOut == nil {
-		// todo
+func coinbaseTxIsValid(tx *Transaction, index int64) bool {
+	if tx.getTxId() != tx.Id {
+		return false
 	}
-	// addr := unSpentTxOut.Address
-	hash := crypto.Keccak256Hash([]byte(data))
-	signature, err := crypto.Sign(hash.Bytes(), privateKey)
-	if err != nil {
-		log.Fatal(err)
+	if len(tx.TxIns) != 1 {
+		return false
 	}
-	return string(signature)
-}
-
-func findUnspentTxOut(outId string, outIndex int, unSpent map[string]*UnSpentTxOut) *UnSpentTxOut {
-	key := txOutKey(outId, outIndex)
-	return unSpent[key]
-}
-
-func txOutKey(outId string, outIndex int) string {
-	return fmt.Sprintf("%s:%d", outId, outIndex)
+	if tx.TxIns[0].TxOutIndex != int(index) {
+		return false
+	}
+	if len(tx.TxOuts) != 1 {
+		return false
+	}
+	if tx.TxOuts[0].Amount != int64(MINE_AMOUNT) {
+		return false
+	}
+	return true
 }

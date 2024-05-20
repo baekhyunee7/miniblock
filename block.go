@@ -330,25 +330,6 @@ func (c *BlockChain) handleResponseLatest(b *Block, conn *websocket.Conn) {
 	}
 }
 
-func coinbaseTxIsValid(tx *Transaction, index int64) bool {
-	if tx.getTxId() != tx.Id {
-		return false
-	}
-	if len(tx.TxIns) != 1 {
-		return false
-	}
-	if tx.TxIns[0].TxOutIndex != int(index) {
-		return false
-	}
-	if len(tx.TxOuts) != 1 {
-		return false
-	}
-	if tx.TxOuts[0].Amount != int64(MINE_AMOUNT) {
-		return false
-	}
-	return true
-}
-
 func (c *BlockChain) txsIsValid(txs []*Transaction, index int64) bool {
 	if !coinbaseTxIsValid(txs[0], index) {
 		return false

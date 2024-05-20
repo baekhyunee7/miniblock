@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/ecdsa"
 	"encoding/hex"
+	"fmt"
 
 	"github.com/ethereum/go-ethereum/crypto"
 )
@@ -18,4 +19,8 @@ func deserializeECDSAPrivateKey(hexKey string) (*ecdsa.PrivateKey, error) {
 		return nil, err
 	}
 	return crypto.ToECDSA(privBytes)
+}
+
+func txOutKey(outId string, outIndex int) string {
+	return fmt.Sprintf("%s:%d", outId, outIndex)
 }
